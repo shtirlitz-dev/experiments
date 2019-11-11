@@ -35,17 +35,24 @@ std::vector<string> log_entries;
 HANDLE hLogEvent = nullptr;
 std::atomic_bool close_log = false;
 
-template<typename ...Args>
-void Log(Args&& ... args)
+class Log
 {
   std::stringstream sstream;
-  sstream << "[" << current_thread() << "] ";
-  ((sstream << std::forward<Args>(args)), ...);
-  sstream << std::endl;
-  std::lock_guard lg(mx_log);
-  log_entries.push_back(sstream.str());
-  SetEvent(hLogEvent);
-}
+public:
+  Log() {
+    sstream << "[" << current_thread() << "] ";
+  }
+  template<class T>
+  auto& operator<<(T&& arg) {
+    return sstream << std::forward<T>(arg);
+  }
+  ~Log() {
+    sstream << std::endl;
+    std::lock_guard lg(mx_log);
+    log_entries.push_back(sstream.str());
+    SetEvent(hLogEvent);
+  }
+};
 
 std::experimental::generator<string> log_getter() {
   std::vector<string> entries;
@@ -66,25 +73,25 @@ auto echo(asio::ip::tcp::socket socket, int conn_number) {
       std::error_code ec;
       const auto size = co_await socket.async_read_some(asio::buffer(buffer), use_awaitable(ec));
       if (ec) {
-        Log(conn_number, ": recv error: ", ec.message(), " (", ec.value(), ")");
+        Log() << conn_number << ": recv error: " << ec.message() << " (" << ec.value() << ")";
         break;
       }
       auto [method, url, protocol] = get_request(buffer.data(), size);
-      Log(conn_number, ": received: ", method, " ", url, " ", protocol);
+      Log() << conn_number << ": received: " << method << " " << url << " " << protocol;
       auto answer = form_answer(method, url, protocol);
       auto write_res = co_await asio::async_write(socket, asio::buffer(answer.data(), answer.size()), use_awaitable(ec));
       if (ec) {
-        Log(conn_number, ": send error: ", ec.message(), " (", ec.value(), ")");
+        Log() << conn_number << ": send error: " << ec.message() << " (" << ec.value() << ")";
         break;
       }
-      Log(conn_number, ": written: ", write_res, " bytes");
+      Log() << conn_number << ": written: " << write_res << " bytes";
     }
   };
 }
 
 auto server(asio::ip::tcp::endpoint endpoint) {
   return [endpoint]() -> asio::awaitable<void> {
-    Log("server starts on ", endpoint.address().to_string(), ":", endpoint.port());
+    Log() << "server starts on " << endpoint.address().to_string() << ":" << endpoint.port();
     auto executor = co_await asio::this_coro::executor;
     asio::ip::tcp::acceptor acceptor{ executor, endpoint };
     while (true) {
@@ -97,7 +104,7 @@ auto server(asio::ip::tcp::endpoint endpoint) {
       }
       static std::atomic_int number{ 0 };
       int conn_number = ++number;
-      Log("port ", endpoint.port(), " - connection ", conn_number, " from ", socket.remote_endpoint().address().to_string());
+      Log() << "port " << endpoint.port() << " - connection " << conn_number << " from " << socket.remote_endpoint().address().to_string();
       co_spawn(executor, echo(std::move(socket), conn_number), detach_rethrow);
     }
   };
@@ -115,14 +122,15 @@ int main() {
     asio::signal_set signals{ context, SIGINT, SIGTERM };
     signals.async_wait([&](auto, auto) {
       close_log = true;
-      Log("terminating...");
+      Log() << "terminating...";
       context.stop();
     });
 
+    const char *host = "192.168.178.39";
     //auto endpoint = asio::ip::tcp::resolver{ context }.resolve("127.0.0.1", "9000")->endpoint();
-    auto endpoint = asio::ip::tcp::resolver{ context }.resolve("192.168.178.39", "8080")->endpoint();
+    auto endpoint = asio::ip::tcp::resolver{ context }.resolve(host, "8888")->endpoint();
     asio::co_spawn(context, server(endpoint), detach_rethrow);
-    auto endpoint2 = asio::ip::tcp::resolver{ context }.resolve("192.168.178.39", "8000")->endpoint();
+    auto endpoint2 = asio::ip::tcp::resolver{ context }.resolve(host, "7777")->endpoint();
     asio::co_spawn(context, server(endpoint2), detach_rethrow);
 
     // context.run(); in multiple threads

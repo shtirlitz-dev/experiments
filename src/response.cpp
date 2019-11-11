@@ -21,7 +21,6 @@ tuple<string_view, string_view, string_view> get_request(const char* data, size_
   return { method, url, protocol };
 }
 
-
 std::vector<char> from_resource(int id) {
   HMODULE hModule = NULL;
   GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCTSTR)&from_resource, &hModule);
