@@ -1,6 +1,8 @@
 #include <windows.h>
 
 101 ICON "main.ico"
+101 DAT "main.ico"
+102 DAT "photo.jpg"
 
 VS_VERSION_INFO VERSIONINFO
   PRODUCTVERSION 1, 0
