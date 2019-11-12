@@ -13,7 +13,12 @@ using std::string_view;
 using std::tuple;
 
 auto current_thread() {
-  return ::GetCurrentThreadId();
+  // assigns progressive number to every thread
+  static thread_local int th_num = 0;
+  static std::atomic_int last_th_num = 0;
+  if (th_num == 0)
+    th_num = ++last_th_num;
+  return th_num;
 }
 
 auto use_awaitable() {
@@ -126,8 +131,7 @@ int main() {
       context.stop();
     });
 
-    const char *host = "192.168.178.39";
-    //auto endpoint = asio::ip::tcp::resolver{ context }.resolve("127.0.0.1", "9000")->endpoint();
+    const char* host = "127.0.0.1";
     auto endpoint = asio::ip::tcp::resolver{ context }.resolve(host, "8888")->endpoint();
     asio::co_spawn(context, server(endpoint), detach_rethrow);
     auto endpoint2 = asio::ip::tcp::resolver{ context }.resolve(host, "7777")->endpoint();
