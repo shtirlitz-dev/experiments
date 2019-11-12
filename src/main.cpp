@@ -36,16 +36,18 @@ void detach_rethrow(std::exception_ptr e) {
 }
 
 std::mutex mx_log;
+std::condition_variable log_check;
 std::vector<string> log_entries;
-HANDLE hLogEvent = nullptr;
 std::atomic_bool close_log = false;
 
 class Log
 {
   std::stringstream sstream;
 public:
-  Log() {
-    sstream << "[" << current_thread() << "] ";
+  Log(int conn_number = 0) {
+    sstream << "[thread " << current_thread() << "] ";
+    if (conn_number)
+      sstream << "connection " << conn_number << ": ";
   }
   template<class T>
   auto& operator<<(T&& arg) {
@@ -53,21 +55,23 @@ public:
   }
   ~Log() {
     sstream << std::endl;
-    std::lock_guard lg(mx_log);
+    std::lock_guard locker(mx_log);
     log_entries.push_back(sstream.str());
-    SetEvent(hLogEvent);
+    log_check.notify_one();
   }
 };
 
 std::experimental::generator<string> log_getter() {
   std::vector<string> entries;
   while (!close_log) {
-    WaitForSingleObject(hLogEvent, INFINITE);
     entries.clear();
-    if (std::lock_guard lg(mx_log); true)
-      std::swap(entries, log_entries);
+    std::unique_lock<std::mutex> locker(mx_log);
+    log_check.wait(locker);
+    std::swap(entries, log_entries);
+    locker.unlock();
     for (auto& item : entries)
       co_yield item;
+    locker.lock();
   }
 }
 
@@ -78,18 +82,18 @@ auto echo(asio::ip::tcp::socket socket, int conn_number) {
       std::error_code ec;
       const auto size = co_await socket.async_read_some(asio::buffer(buffer), use_awaitable(ec));
       if (ec) {
-        Log() << conn_number << ": recv error: " << ec.message() << " (" << ec.value() << ")";
+        Log(conn_number) << "recv error: " << ec.message() << " (" << ec.value() << ")";
         break;
       }
       auto [method, url, protocol] = get_request(buffer.data(), size);
-      Log() << conn_number << ": received: " << method << " " << url << " " << protocol;
+      Log(conn_number) << "received: " << method << " " << url << " " << protocol;
       auto answer = form_answer(method, url, protocol);
       auto write_res = co_await asio::async_write(socket, asio::buffer(answer.data(), answer.size()), use_awaitable(ec));
       if (ec) {
-        Log() << conn_number << ": send error: " << ec.message() << " (" << ec.value() << ")";
+        Log(conn_number) << "send error: " << ec.message() << " (" << ec.value() << ")";
         break;
       }
-      Log() << conn_number << ": written: " << write_res << " bytes";
+      Log(conn_number) << write_res << " bytes written";
     }
   };
 }
@@ -104,12 +108,12 @@ auto server(asio::ip::tcp::endpoint endpoint) {
       // wait for incoming connection
       auto socket = co_await acceptor.async_accept(use_awaitable(ec));
       if (ec) {
-        fmt::print(stderr, "accept error: {} ({})\n", ec.message(), ec.value());
+        Log() << "accept error: " << ec.message() << " (" << ec.value() << ")";
         continue;
       }
       static std::atomic_int number{ 0 };
       int conn_number = ++number;
-      Log() << "port " << endpoint.port() << " - connection " << conn_number << " from " << socket.remote_endpoint().address().to_string();
+      Log(conn_number) << "on port " << endpoint.port() << " from " << socket.remote_endpoint().address().to_string();
       co_spawn(executor, echo(std::move(socket), conn_number), detach_rethrow);
     }
   };
@@ -117,8 +121,6 @@ auto server(asio::ip::tcp::endpoint endpoint) {
 
 
 int main() {
-  hLogEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-
   try {
     int work_thread_count = std::thread::hardware_concurrency();
     std::cout << work_thread_count << " working threads" << std::endl;
@@ -152,6 +154,5 @@ int main() {
   catch (std::exception& e) {
     fmt::print(stderr, "error: {}\n", e.what());
   }
-  CloseHandle(hLogEvent);
 }
 
