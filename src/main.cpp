@@ -61,17 +61,18 @@ public:
   }
 };
 
-std::experimental::generator<string> log_getter() {
+auto log_getter() {
   std::vector<string> entries;
-  while (!close_log) {
-    entries.clear();
-    std::unique_lock<std::mutex> locker(mx_log);
-    log_check.wait(locker);
-    std::swap(entries, log_entries);
-    locker.unlock();
+  while (true) {
     for (auto& item : entries)
       co_yield item;
-    locker.lock();
+    entries.clear();
+    if (close_log)
+      break;
+    // wait for the next entries
+    std::unique_lock<std::mutex> locker(mx_log);
+    log_check.wait(locker);
+    std::swap(entries, log_entries); // mutex is locked here
   }
 }
 
