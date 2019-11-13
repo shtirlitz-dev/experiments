@@ -12,7 +12,7 @@ using std::string;
 using std::string_view;
 using std::tuple;
 
-auto current_thread() {
+auto curr_thread_id() {
   // assigns progressive number to every thread
   static thread_local int th_num = 0;
   static std::atomic_int last_th_num = 0;
@@ -45,7 +45,7 @@ class Log
   std::stringstream sstream;
 public:
   Log(int conn_number = 0) {
-    sstream << "[thread " << current_thread() << "] ";
+    sstream << "[thread " << curr_thread_id() << "] ";
     if (conn_number)
       sstream << "connection " << conn_number << ": ";
   }
@@ -71,19 +71,23 @@ auto log_getter() {
       break;
     // wait for the next entries
     std::unique_lock<std::mutex> locker(mx_log);
-    log_check.wait(locker);
+    if (log_entries.empty())
+      log_check.wait(locker);
     std::swap(entries, log_entries); // mutex is locked here
   }
 }
 
-auto echo(asio::ip::tcp::socket socket, int conn_number) {
+auto make_http_handler(asio::ip::tcp::socket socket, int conn_number) {
   return [socket = std::move(socket), conn_number]() mutable -> asio::awaitable<void> {
     std::array<char, 1024> buffer;
     while (true) {
       std::error_code ec;
       const auto size = co_await socket.async_read_some(asio::buffer(buffer), use_awaitable(ec));
       if (ec) {
-        Log(conn_number) << "recv error: " << ec.message() << " (" << ec.value() << ")";
+        if (ec.value()==2)
+          Log(conn_number) << "closed";
+        else
+          Log(conn_number) << "recv error: " << ec.message() << " (" << ec.value() << ")";
         break;
       }
       auto [method, url, protocol] = get_request(buffer.data(), size);
@@ -101,21 +105,27 @@ auto echo(asio::ip::tcp::socket socket, int conn_number) {
 
 auto server(asio::ip::tcp::endpoint endpoint) {
   return [endpoint]() -> asio::awaitable<void> {
-    Log() << "server starts on " << endpoint.address().to_string() << ":" << endpoint.port();
     auto executor = co_await asio::this_coro::executor;
-    asio::ip::tcp::acceptor acceptor{ executor, endpoint };
-    while (true) {
-      std::error_code ec;
-      // wait for incoming connection
-      auto socket = co_await acceptor.async_accept(use_awaitable(ec));
-      if (ec) {
-        Log() << "accept error: " << ec.message() << " (" << ec.value() << ")";
-        continue;
+    auto ip_and_port = endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
+    try {
+      asio::ip::tcp::acceptor acceptor{ executor, endpoint, false };
+      Log() << "server starts on " << ip_and_port;
+      while (true) {
+        std::error_code ec;
+        // wait for incoming connection
+        auto socket = co_await acceptor.async_accept(use_awaitable(ec));
+        if (ec) {
+          Log() << "accept error: " << ec.message() << " (" << ec.value() << ")";
+          continue;
+        }
+        static std::atomic_int number{ 0 };
+        int conn_number = ++number;
+        Log(conn_number) << "on port " << endpoint.port() << " from " << socket.remote_endpoint().address().to_string();
+        co_spawn(executor, make_http_handler(std::move(socket), conn_number), detach_rethrow);
       }
-      static std::atomic_int number{ 0 };
-      int conn_number = ++number;
-      Log(conn_number) << "on port " << endpoint.port() << " from " << socket.remote_endpoint().address().to_string();
-      co_spawn(executor, echo(std::move(socket), conn_number), detach_rethrow);
+    }
+    catch (asio::system_error & ex) {
+      Log() << "server on " << ip_and_port << " error:" << ex.code();
     }
   };
 }
@@ -124,6 +134,8 @@ auto server(asio::ip::tcp::endpoint endpoint) {
 int main() {
   try {
     int work_thread_count = std::thread::hardware_concurrency();
+    if (!work_thread_count)
+      work_thread_count = 1;
     std::cout << work_thread_count << " working threads" << std::endl;
     asio::io_context context{ work_thread_count };
 
