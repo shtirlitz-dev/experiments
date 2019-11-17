@@ -77,7 +77,7 @@ auto log_getter() {
   }
 }
 
-auto make_http_handler(asio::ip::tcp::socket socket, int conn_number) {
+auto make_http_handler(asio::ip::tcp::socket &&socket, int conn_number) {
   return [socket = std::move(socket), conn_number]() mutable -> asio::awaitable<void> {
     std::array<char, 1024> buffer;
     while (true) {
